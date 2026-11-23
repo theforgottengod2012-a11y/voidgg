@@ -1,31 +1,39 @@
 # VOID // Staff System
 
-A configurable Discord staff-management bot built with discord.js v14 and MongoDB. It combines timezone-aware staff activity records, voice tracking, explicit rank administration, and a restrained dark interface.
+A configurable Discord staff-management bot built with discord.js v14 and MongoDB. Railway runs it as a persistent Node.js worker; it does not open a web server or require a public domain.
 
-## Requirements
+## Railway deployment
 
-- Node.js 20+
-- MongoDB 6+ (local or managed)
-- Discord application and bot with **Guilds**, **Guild Members**, **Guild Messages**, **Message Content**, and **Guild Voice States** intents enabled in the Developer Portal
-- Bot permissions: View Channels, Send Messages, Embed Links, Read Message History, Manage Roles (for rank changes). Place the bot's highest role above all configured staff ranks.
+1. Create a Railway project and deploy this repository as a service.
+2. In **Service → Variables**, add these required variables (values come from your Discord app and MongoDB provider):
+   - `BOT_TOKEN` — Discord bot token.
+   - `CLIENT_ID` — Discord application ID.
+   - `MONGODB_URI` — MongoDB connection URI supplied by your MongoDB host/Railway MongoDB service.
+3. Optional variables:
+   - `GUILD_ID` — a test server ID for faster development slash-command registration. Leave unset for global registration.
+   - `PREFIX` — command prefix; defaults to `$`.
+4. Railway builds with Nixpacks and starts the persistent worker with `npm start` (configured in `railway.json`). No `.env` upload, web server, port, or domain is needed. Railway injects variables into `process.env`; `.env.example` is only a local-development template.
+5. Check deployment logs for `[database] Connected to MongoDB.` and `[client] Online as ...`. Missing required variable names are reported safely; variable values and tokens are never printed.
 
-## Installation
+For Railway-hosted MongoDB, attach/provision the database and use the exact connection URI exposed by that service. Ensure the URI's credentials/database name are valid and that the deployment can reach the database. For external MongoDB, allowlist the necessary network access per provider instructions. The app passes `MONGODB_URI` directly to Mongoose.
 
-```bash
-npm install
-cp .env.example .env
-```
+## Slash-command registration
 
-Set `BOT_TOKEN`, `CLIENT_ID`, and `MONGODB_URI` in `.env`. Never commit `.env`. `GUILD_ID` is optional and registers commands to one development server; without it, commands register globally and propagation can take time. `PREFIX` defaults to `$`.
-
-Configure the application in the Discord Developer Portal, enable the intents listed above, then install it with the `bot` and `applications.commands` scopes. Start MongoDB and run:
+Slash commands are intentionally **not** registered on every bot restart. After the first deployment, or whenever slash command definitions change, run the one-off command from the service's Railway shell:
 
 ```bash
 npm run deploy-commands
-npm start
 ```
 
-For development, set `GUILD_ID` to your test server and rerun `npm run deploy-commands` after changing slash command definitions.
+This requires `BOT_TOKEN` and `CLIENT_ID`. If `GUILD_ID` is set, registration is scoped to that server for quick testing. Remove `GUILD_ID` and run the command again to register globally (global updates can take time to appear). Routine service restarts only log in and run the bot; they do not call the registration API.
+
+## Local development
+
+- Node.js 20+ and MongoDB 6+.
+- Run `npm install`, copy `.env.example` to `.env`, and set the variables for your local environment. `dotenv` is loaded only outside production; no `.env` file is expected on Railway.
+- Enable **Guilds**, **Guild Members**, **Guild Messages**, **Message Content**, and **Guild Voice States** intents in the Discord Developer Portal.
+- Invite the application with `bot` and `applications.commands` scopes. Permissions: View Channels, Send Messages, Embed Links, Read Message History, and Manage Roles (rank actions). Put the bot's highest role above all configured staff ranks.
+- Run `npm run deploy-commands` and `npm start`. For development, set `GUILD_ID` to your test guild before registration.
 
 ## First-time setup
 
@@ -33,38 +41,35 @@ For development, set `GUILD_ID` to your test server and rerun `npm run deploy-co
 2. `$modstats channel add #staff-chat` and `$modstats voicechannel add #staff-voice`.
 3. Set goals with `$modstats requirement messages 50` and `$modstats requirement voice 30` (voice goal is minutes per member-local day).
 4. Optionally set `$modstats afk set #afk-voice`, `$modstats defaulttimezone Europe/London`, and `$modstats audit #staff-audit`.
-5. Users can select their own IANA timezone using `$tz Asia/Dhaka`. A user's current local date determines the daily bucket.
-6. Configure staff managers with `$modstats permissions add @Staff Manager` (server admins and members with Manage Server retain access).
-
-Slash equivalents are provided for all top-level commands. Prefix commands use `$` unless `PREFIX` is set in the environment.
+5. Users can select an IANA timezone using `$tz Asia/Dhaka`; unset users use the server default.
+6. Configure managers with `$modstats permissions add @StaffManager`. Server admins and members with Manage Server retain access.
 
 ## Commands
 
-- `$help` — command directory
-- `$tz [IANA zone | @user | list | reset]` — timezone preference and local time
-- `$modstats view [@user]`, `history [@user]`, `leaderboard`, `setup`
-- `$modstats channel|voicechannel add|remove|list #channel`
-- `$modstats afk set #channel` / `afk disable`
-- `$modstats requirement messages|voice <count>`
-- `$modstats defaulttimezone <IANA zone>`, `audit #channel`, `permissions add|remove @role`, `restrict on|off`
-- `$modstats reset @user` / `$modstats reset all`
-- `$staffrole add|remove @role`, `list`, `setorder @role...`, `config`
-- `$promote @user`, `$demote @user`, `$strip @user`
+- `$help` — command directory.
+- `$tz [IANA zone | @user | list | reset]` — view/set timezone, inspect another member, list common zones, or reset to the server default.
+- `$modstats view [@user]`, `history [@user]`, `leaderboard`, `setup`.
+- `$modstats channel|voicechannel add|remove|list #channel`.
+- `$modstats afk set #channel` / `afk disable`.
+- `$modstats requirement messages|voice <count>`.
+- `$modstats defaulttimezone <IANA zone>`, `audit #channel`, `permissions add|remove @role`, `restrict on|off`.
+- `$modstats reset @user` / `$modstats reset all` (bulk reset requires a confirmation button).
+- `$staffrole add|remove @role`, `list`, `setorder @role...`, `config`.
+- `$promote @user`, `$demote @user`, `$strip @user` (confirmed role changes).
 
-All potentially sensitive staff-role changes use a confirmation button. Authorized managers are server administrators/Manage Server members or configured manager-role holders. `restrict on` makes views of other staff limited to authorized managers.
+Slash-command equivalents are available for the command set. Configure ranks and tracked channels before relying on activity records.
 
 ## Tracking and data behavior
 
-- Only configured staff roles, channels, non-bot members, and non-webhook messages are counted. Message IDs are deduplicated and dedupe records expire after 14 days.
-- Voice activity is written in bounded 60-second heartbeats and split at the user's local midnight. AFK and unconfigured channels are excluded. Existing voice sessions are closed at their last durable cursor during startup; downtime is never credited. On reconnect, live eligible voice participants are rebuilt as new sessions.
-- Daily documents retain historical buckets. Timezone changes do not rewrite old records; future events use the newly selected local date and timezone. Changing zone can therefore create a new apparent daily boundary, intentionally without destructive migration.
-- Manual resets zero only the current local-date bucket and write an audit entry; earlier daily buckets remain available.
-- Statistics are isolated by guild. MongoDB unique indexes prevent duplicate daily buckets and message IDs.
+- Activity is isolated by guild. Only configured staff, text/voice channels, non-bot users, and non-webhook messages are counted. Message IDs are deduplicated.
+- Voice activity is written in bounded heartbeats and split at the user's local midnight. AFK and unconfigured channels are excluded. Downtime is not credited; eligible live sessions are rebuilt at startup.
+- Daily records are retained across rollovers and resets. Timezone changes do not rewrite previous buckets; subsequent events use the new local day.
+- MongoDB stores guild settings, preferences, daily activity, voice sessions, deduplication records, and audit entries.
 
-## Hosting and operations
+## Tests
 
-Use a process manager (systemd, Docker, PM2, or a managed Node host) with automatic restart. Supply environment variables through the host's secret manager, keep MongoDB network access restricted, and back up the database. Do not expose tokens or connection strings in logs. The bot logs startup and sanitized error messages; operational monitoring should alert on process exits and database availability.
+Run `npm test` locally or in CI. The suite validates prefix command argument parsing, timezone command forms, IANA timezone validation, and local-date calculations. End-to-end Discord/MongoDB behavior requires credentials and a private test guild; do not use production credentials in a test environment.
 
-## Development notes
+## Operations and security
 
-Shared command handlers back prefix and slash interfaces. Run `npm test` for the Node test suite (currently reserved for service-level tests); run the bot against a private test guild before production and verify role hierarchy, permissions, tracking channels, and indexes. This application deliberately uses MongoDB as the authoritative persistence layer and avoids counting downtime as voice activity.
+Use Railway Variables for secrets and keep MongoDB network access restricted. Do not commit `.env` or print credentials. Back up MongoDB. Bot logs contain operational status and sanitized errors. Railway automatically restarts the worker after failures as configured in `railway.json`.
