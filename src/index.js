@@ -1,7 +1,9 @@
 const { Client, GatewayIntentBits, Partials, Events } = require('discord.js');
 const { connectDatabase } = require('./database');
 const { onMessage, onVoiceState, heartbeat, recoverSessions } = require('./services/tracking');
-const { handleModstats, handleTimezone, handleStaffRole, staffAction, executeStaffConfirmation, executeResetConfirmation, handleHelp } = require('./commands/handlers');
+const { handleModstats, handleTimezone, handleStaffRole, executeStaffConfirmation, executeResetConfirmation, handleHelp } = require('./commands/handlers');
+const { handleHistory } = require('./commands/history');
+const { staffAction } = require('./commands/staff-actions');
 
 // dotenv is for local development only. Railway injects variables directly into process.env.
 if (process.env.NODE_ENV !== 'production') {
@@ -22,7 +24,13 @@ client.pending = new Map();
 async function dispatch(ctx, name) {
   try {
     if (name === 'help') return await handleHelp(ctx);
-    if (name === 'modstats') return await handleModstats(ctx);
+    if (name === 'modstats') {
+      const history = ctx.interaction
+        ? ctx.interaction.options.getSubcommand() === 'history'
+        : ctx.args[0]?.toLowerCase() === 'history';
+      if (history) return await handleHistory(ctx);
+      return await handleModstats(ctx);
+    }
     if (name === 'tz') return await handleTimezone(ctx);
     if (name === 'staffrole') return await handleStaffRole(ctx);
     if (['promote', 'demote', 'strip'].includes(name)) return await staffAction(ctx, name);
