@@ -1,7 +1,8 @@
-const { DailyActivity, GuildConfig, UserTimezone } = require('../models');
+const { DailyActivity, UserTimezone } = require('../models');
 const { getConfig, logAction } = require('../utils/config');
 const { getTimezone, localDate, validTimezone } = require('../utils/time');
-const { success, warning, failure, embed, progress } = require('../utils/embeds');
+const { success, warning, failure, embed } = require('../utils/embeds');
+const { activityPoints, activityTarget, meetsActivityTarget } = require('../utils/activity-points');
 const { DateTime } = require('luxon');
 const { PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
@@ -35,9 +36,11 @@ async function getStats(guildId, userId, timezone) {
   for (let i = 13; i >= 0; i--) {
     const date = DateTime.fromISO(today, { zone: timezone }).minus({ days: i }).toISODate();
     const doc = byDate.get(date);
-    days.push({ date, messages: doc?.messages || 0, voiceMinutes: doc?.voiceMinutes || 0 });
+    const messages = doc?.messages || 0;
+    const voiceMinutes = doc?.voiceMinutes || 0;
+    days.push({ date, messages, voiceMinutes, points: activityPoints(messages, voiceMinutes) });
   }
-  return { today, days, messages14: days.reduce((n, d) => n + d.messages, 0), voice14: days.reduce((n, d) => n + d.voiceMinutes, 0) };
+  return { today, days, messages14: days.reduce((n, d) => n + d.messages, 0), voice14: days.reduce((n, d) => n + d.voiceMinutes, 0), points14: days.reduce((n, d) => n + d.points, 0) };
 }
 async function showStats(ctx, user, history = false) {
   const config = await getConfig(ctx.guild.id);
@@ -48,11 +51,16 @@ async function showStats(ctx, user, history = false) {
   const timezone = await getTimezone(ctx.guild.id, user.id, config);
   const stats = await getStats(ctx.guild.id, user.id, timezone);
   const today = stats.days.at(-1);
-  const dailyOk = today.messages >= config.messageRequirement && today.voiceMinutes >= config.voiceRequirement;
-  const lines = history ? stats.days.map(d => `\n**${d.date}** · ${d.messages} messages · ${d.voiceMinutes} min · ${d.messages >= config.messageRequirement && d.voiceMinutes >= config.voiceRequirement ? 'Complete' : 'Incomplete'}`).join('') : '';
-  const completed = stats.days.filter(d => d.messages >= config.messageRequirement && d.voiceMinutes >= config.voiceRequirement).length;
-  const card = embed(history ? `14-Day Record // ${staff.displayName}` : `Activity // ${staff.displayName}`, history ? `Timezone: **${timezone}**${lines}\n\n**14-day totals**\nMessages: ${stats.messages14} · Voice: ${stats.voice14} min\nDaily averages: ${(stats.messages14 / 14).toFixed(1)} messages · ${(stats.voice14 / 14).toFixed(1)} min\nDays completed: ${completed} · Missed: ${14 - completed}` : `Local day: **${stats.today}** · ${timezone}\n\n**Messages**\n${progress(today.messages, config.messageRequirement)}\n\n**Voice activity**\n${progress(today.voiceMinutes, config.voiceRequirement)} min\n\n**Requirement status:** ${dailyOk ? 'Complete' : 'In progress'}\n\n14-day totals: **${stats.messages14} messages** · **${stats.voice14} voice minutes**`);
-  card.addFields({ name: 'Daily requirements', value: `${config.messageRequirement} messages · ${config.voiceRequirement} voice minutes`, inline: true });
+  const targetPoints = activityTarget(config);
+  const dailyOk = meetsActivityTarget(today.messages, today.voiceMinutes, targetPoints);
+  const lines = history ? stats.days.map(d => `\n**${d.date}** · ${d.messages} messages · ${d.voiceMinutes} min · **${d.points} pts** · ${meetsActivityTarget(d.messages, d.voiceMinutes, targetPoints) ? 'Complete' : 'Incomplete'}`).join('') : '';
+  const completed = stats.days.filter(d => meetsActivityTarget(d.messages, d.voiceMinutes, targetPoints)).length;
+  const remaining = Math.max(0, targetPoints - today.points);
+  const extra = Math.max(0, today.points - targetPoints);
+  const card = embed(history ? `14-Day Record // ${staff.displayName}` : `Activity // ${staff.displayName}`, history
+    ? `Timezone: **${timezone}**${lines}\n\n**14-day totals**\nMessages: ${stats.messages14} · Voice: ${stats.voice14} min · **${stats.points14} points**\nDaily average: ${(stats.points14 / 14).toFixed(1)} points\nDays completed: ${completed} · Missed: ${14 - completed}\n\n**Daily target:** ${targetPoints} points`
+    : `Local day: **${stats.today}** · ${timezone}\n\n**Messages:** ${today.messages} · **${today.messages} points**\n**Voice activity:** ${today.voiceMinutes} min · **${today.voiceMinutes} points**\n\n**Combined activity:** **${today.points} / ${targetPoints} points**${extra ? ` (+${extra} extra)` : ''}\n**Requirement status:** ${dailyOk ? `Complete${extra ? ` · ${extra} extra points` : ''}` : `In progress · ${remaining} points to go`}\n\n14-day totals: **${stats.messages14} messages** · **${stats.voice14} voice minutes** · **${stats.points14} points**`);
+  card.addFields({ name: 'Daily activity target', value: `**${targetPoints} combined points**\nEach message = 1 point · Each voice minute = 1 point`, inline: true });
   return reply(ctx, { embeds: [card] });
 }
 async function resetCounters(guild, config, userId = null) {
@@ -85,16 +93,22 @@ async function handleModstats(ctx) {
     const members = await ctx.guild.members.fetch();
     const eligible = members.filter(m => !m.user.bot && memberHasRole(m, config.staffRoleIds));
     const rows = [];
+    const targetPoints = activityTarget(config);
     for (const [, m] of eligible) {
       const zone = await getTimezone(ctx.guild.id, m.id, config);
       const date = localDate(new Date(), zone);
       const s = await DailyActivity.findOne({ guildId: ctx.guild.id, userId: m.id, localDate: date }).lean();
-      rows.push({ name: m.displayName, messages: s?.messages || 0, voice: s?.voiceMinutes || 0 });
+      const messages = s?.messages || 0;
+      const voice = s?.voiceMinutes || 0;
+      rows.push({ name: m.displayName, messages, voice, points: activityPoints(messages, voice), complete: meetsActivityTarget(messages, voice, targetPoints) });
     }
-    rows.sort((a, b) => b.messages - a.messages || b.voice - a.voice);
-    return reply(ctx, { embeds: [embed('Staff activity // today', rows.slice(0, 15).map((r, i) => `**${String(i + 1).padStart(2, '0')}** ${r.name} — ${r.messages} messages · ${r.voice} min`).join('\n') || 'No configured staff activity yet.')] });
+    rows.sort((a, b) => b.points - a.points || b.messages - a.messages || b.voice - a.voice);
+    return reply(ctx, { embeds: [embed('Staff activity // today', `Combined points · target: **${targetPoints}**\n${rows.slice(0, 15).map((r, i) => `**${String(i + 1).padStart(2, '0')}** ${r.name} — **${r.points} pts** (${r.messages} messages + ${r.voice} voice min) ${r.complete ? '✅' : ''}`).join('\n') || 'No configured staff activity yet.'}`)] });
   }
-  if (op === 'setup') return reply(ctx, { embeds: [embed('System setup // status', `Staff ranks: ${config.staffRoleIds.length}\nMessage channels: ${config.messageChannels.length}\nVoice channels: ${config.voiceChannels.length}\nAFK channel: ${config.afkChannelId ? `<#${config.afkChannelId}>` : 'not set'}\nDaily targets: ${config.messageRequirement} messages · ${config.voiceRequirement} voice minutes\nDefault timezone: ${config.defaultTimezone}\nAudit log: ${config.auditChannelId ? `<#${config.auditChannelId}>` : 'not set'}\n\nConfigure with $staffrole and $modstats commands.`)] });
+  if (op === 'setup') {
+    const targetPoints = activityTarget(config);
+    return reply(ctx, { embeds: [embed('System setup // status', `Staff ranks: ${config.staffRoleIds.length}\nMessage channels: ${config.messageChannels.length}\nVoice channels: ${config.voiceChannels.length}\nAFK channel: ${config.afkChannelId ? `<#${config.afkChannelId}>` : 'not set'}\nMessage setting: ${config.messageRequirement}\nVoice setting: ${config.voiceRequirement}\n**Shared daily activity target: ${targetPoints} combined points**\nDefault timezone: ${config.defaultTimezone}\nAudit log: ${config.auditChannelId ? `<#${config.auditChannelId}>` : 'not set'}\n\nEach counted message and eligible voice minute earns 1 point. Both requirement settings feed the same target; they are not added together.`)] });
+  }
   if (!canManage(ctx, config)) return reply(ctx, { embeds: [failure('You need Manage Server permission or a configured staff-manager role.')] });
   if (op === 'channel' || op === 'voicechannel') {
     const action = ctx.interaction ? option(ctx, 'action') : (ctx.args.shift() || '').toLowerCase();
@@ -122,7 +136,8 @@ async function handleModstats(ctx) {
     if (!['messages', 'voice'].includes(type) || !Number.isInteger(amount) || amount < 0) return reply(ctx, { embeds: [failure('Use `requirement messages <count>` or `requirement voice <minutes>` with a non-negative integer.')] });
     config[type === 'messages' ? 'messageRequirement' : 'voiceRequirement'] = amount; await config.save();
     await logAction(ctx.guild, ctx.user.id, null, 'modstats.requirement', { type, amount });
-    return reply(ctx, { embeds: [success('Daily target updated', `${type === 'voice' ? 'Voice' : 'Message'} requirement set to **${amount}**${type === 'voice' ? ' minutes' : ' messages'}.`)] });
+    const targetPoints = activityTarget(config);
+    return reply(ctx, { embeds: [success('Daily combined target updated', `${type === 'voice' ? 'Voice' : 'Message'} setting set to **${amount}**. Shared combined target is now **${targetPoints} points**; the two settings are not added together.`)] });
   }
   if (op === 'defaulttimezone') {
     const zone = ctx.interaction ? option(ctx, 'timezone') : ctx.args[0];
@@ -289,6 +304,6 @@ async function executeStaffConfirmation(interaction) {
   }
 }
 async function handleHelp(ctx) {
-  return reply(ctx, { embeds: [embed('VOID // command directory', '**STAFF ACTIVITY**\n`$modstats view [@user]` · `$modstats history [@user]` · `$modstats leaderboard`\n`$modstats setup` · `$modstats reset @user|all`\n\n**CONFIGURATION**\n`$modstats channel add/remove/list #channel` · `$modstats voicechannel add/remove/list #channel`\n`$modstats requirement messages|voice <amount>` · `$modstats afk set #channel|disable`\n`$modstats defaulttimezone <IANA>` · `$modstats audit #channel` · `$modstats permissions add/remove @role`\n\n**TIMEZONES**\n`$tz` · `$tz Asia/Dhaka` · `$tz @user` · `$tz list` · `$tz reset`\n\n**STAFF ROLES**\n`$staffrole add/remove/list/setorder/config` · `$promote @user` · `$demote @user` · `$strip @user`\n\nEquivalent slash commands are available.')] });
+  return reply(ctx, { embeds: [embed('VOID // command directory', '**STAFF ACTIVITY**\n`$modstats view [@user]` · `$modstats history [@user]` · `$modstats leaderboard`\n`$modstats setup` · `$modstats reset @user|all`\n\n**ACTIVITY POINTS**\nEach counted message = 1 point · Each voice minute = 1 point\nThe shared daily target is the higher of the two requirement settings.\n\n**CONFIGURATION**\n`$modstats channel add/remove/list #channel` · `$modstats voicechannel add/remove/list #channel`\n`$modstats requirement messages|voice <amount>` · `$modstats afk set #channel|disable`\n`$modstats defaulttimezone <IANA>` · `$modstats audit #channel` · `$modstats permissions add/remove @role`\n\n**TIMEZONES**\n`$tz` · `$tz Asia/Dhaka` · `$tz @user` · `$tz list` · `$tz reset`\n\n**STAFF ROLES**\n`$staffrole add/remove/list/setorder/config` · `$promote @user` · `$demote @user` · `$strip @user`\n\nEquivalent slash commands are available.')] });
 }
 module.exports = { handleModstats, handleTimezone, handleStaffRole, staffAction, executeStaffConfirmation, executeResetConfirmation, handleHelp, reply, subcommand, target };
