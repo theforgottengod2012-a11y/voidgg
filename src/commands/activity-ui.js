@@ -48,7 +48,23 @@ async function send(ctx, payload) {
   return ctx.message.reply(payload);
 }
 
-// Both `view` and `history` show each local calendar day separately.
+async function getMemberTimezone(guildId, userId, fallback = 'UTC') {
+  const preference = await UserTimezone.findOne({ guildId, userId }).select({ timezone: 1 }).lean();
+  const zone = preference?.timezone || fallback || 'UTC';
+  return validTimezone(zone) ? zone : 'UTC';
+}
+
+function targetStatus(points, target) {
+  if (!target) return '⚪ target not configured';
+  return points >= target ? '✅ target met' : '❌ target not met';
+}
+
+function formatHistoryDate(date, timezone) {
+  return DateTime.fromISO(date, { zone: timezone }).toFormat('LLL dd');
+}
+
+// `$modstats view` keeps today's activity prominent in the original compact
+// card style, then adds a 14-day check/cross tracker and lifetime totals.
 async function handleDailyHistory(ctx) {
   const config = await getConfig(ctx.guild.id);
   const user = getRequestedUser(ctx) || ctx.user;
@@ -66,32 +82,77 @@ async function handleDailyHistory(ctx) {
   const timezone = await getMemberTimezone(ctx.guild.id, user.id, config.defaultTimezone);
   const today = localDate(new Date(), timezone);
   const firstDay = DateTime.fromISO(today, { zone: timezone }).minus({ days: 13 }).toISODate();
-  const records = await DailyActivity.find({
-    guildId: ctx.guild.id,
-    userId: user.id,
-    localDate: { $gte: firstDay, $lte: today }
-  }).select({ localDate: 1, messages: 1, voiceMinutes: 1 }).lean();
+  const [records, lifetimeRows] = await Promise.all([
+    DailyActivity.find({
+      guildId: ctx.guild.id,
+      userId: user.id,
+      localDate: { $gte: firstDay, $lte: today }
+    }).select({ localDate: 1, messages: 1, voiceMinutes: 1 }).lean(),
+    DailyActivity.aggregate([
+      { $match: { guildId: ctx.guild.id, userId: user.id } },
+      { $group: {
+        _id: null,
+        messages: { $sum: '$messages' },
+        voiceMinutes: { $sum: '$voiceMinutes' }
+      } }
+    ])
+  ]);
+
   const byDate = new Map(records.map(record => [record.localDate, record]));
   const target = activityTarget(config);
-  const lines = [];
+  const todayRecord = byDate.get(today);
+  const todayMessages = todayRecord?.messages || 0;
+  const todayVoice = todayRecord?.voiceMinutes || 0;
+  const todayPoints = activityPoints(todayMessages, todayVoice);
+  const lifetime = lifetimeRows[0] || { messages: 0, voiceMinutes: 0 };
+  const lifetimeMessages = lifetime.messages || 0;
+  const lifetimeVoice = lifetime.voiceMinutes || 0;
+  const lifetimePoints = activityPoints(lifetimeMessages, lifetimeVoice);
+
+  const history = [];
   for (let offset = 13; offset >= 0; offset--) {
     const date = DateTime.fromISO(today, { zone: timezone }).minus({ days: offset }).toISODate();
     const record = byDate.get(date);
-    const messages = record?.messages || 0;
-    const voice = record?.voiceMinutes || 0;
-    const points = activityPoints(messages, voice);
-    const status = points >= target ? '✅ target met' : `${Math.max(0, target - points)} points to go`;
-    lines.push(`**${date}** · ${messages} messages · ${voice} voice min · **${points} pts** · ${status}`);
+    const points = activityPoints(record?.messages || 0, record?.voiceMinutes || 0);
+    history.push({ date, points, icon: !target ? '⚪' : points >= target ? '✅' : '❌' });
   }
-  return send(ctx, {
-    embeds: [embed(`Daily activity // ${staff.displayName} · last 14 days`, `Timezone: **${timezone}**\nDaily target: **${target} combined points**\n\n${lines.join('\n')}`)]
-  });
-}
 
-async function getMemberTimezone(guildId, userId, fallback = 'UTC') {
-  const preference = await UserTimezone.findOne({ guildId, userId }).select({ timezone: 1 }).lean();
-  const zone = preference?.timezone || fallback || 'UTC';
-  return validTimezone(zone) ? zone : 'UTC';
+  if (getOperation(ctx) === 'history') {
+    const lines = history.map(({ date, points, icon }) => {
+      const record = byDate.get(date);
+      return `**${date}** · ${record?.messages || 0} messages · ${record?.voiceMinutes || 0} min · **${points} pts** ${icon}`;
+    });
+    const card = embed(`14-Day Record // ${staff.displayName}`, `Timezone: **${timezone}**\nDaily activity target: **${target || 'not configured'} combined points**\n\n${lines.join('\n')}\n\n**All-time totals**\n${lifetimeMessages} messages · ${lifetimeVoice} voice minutes · **${lifetimePoints} points**`);
+    return send(ctx, { embeds: [card] });
+  }
+
+  const historyRows = [history.slice(0, 7), history.slice(7, 14)].map(row =>
+    row.map(day => `${formatHistoryDate(day.date, timezone)} ${day.icon}`).join('  ·  ')
+  ).join('\n');
+  const requirement = !target
+    ? 'Not configured'
+    : todayPoints >= target
+      ? `✅ Met · ${todayPoints - target} points over`
+      : `❌ In progress · ${target - todayPoints} points to go`;
+  const description = [
+    `Local day: **${today}** · ${timezone}`,
+    '',
+    `**Messages:** ${todayMessages} · ${todayMessages} points`,
+    `**Voice activity:** ${todayVoice} min · ${todayVoice} points`,
+    '',
+    `**Combined activity:** ${todayPoints} / ${target} points`,
+    `**Requirement status:** ${requirement}`,
+    '',
+    '**Last 14 days**  ·  ✅ met  ❌ not met',
+    historyRows,
+    '',
+    `**All-time totals:** ${lifetimeMessages} messages · ${lifetimeVoice} voice minutes · **${lifetimePoints} points**`,
+    '',
+    '**Daily activity target**',
+    `**${target} combined points**`,
+    'Each message = 1 point · Each voice minute = 1 point'
+  ].join('\n');
+  return send(ctx, { embeds: [embed(`Activity // ${staff.displayName}`, description)] });
 }
 
 function periodRow(period, ownerId) {
@@ -132,33 +193,33 @@ async function leaderboardData(guild, config, period) {
   if (!staff.length) return { rows: [], target: activityTarget(config) };
 
   const userIds = staff.map(member => member.id);
-  // Fetch all timezone preferences in one round trip. The old per-member lookup
-  // could overrun Discord's three-second component interaction acknowledgement.
   const preferences = await UserTimezone.find({ guildId: guild.id, userId: { $in: userIds } })
     .select({ userId: 1, timezone: 1 })
     .lean();
   const timezoneByUser = new Map(preferences.map(item => [item.userId, validTimezone(item.timezone) ? item.timezone : 'UTC']));
   const dateByUser = new Map();
-  let earliestDate = null;
-  let latestDate = null;
   const days = periodDays(period);
 
   for (const member of staff) {
     const timezone = timezoneByUser.get(member.id) || (validTimezone(config.defaultTimezone) ? config.defaultTimezone : 'UTC');
     const today = localDate(new Date(), timezone);
-    const from = period === 'all'
-      ? null
-      : DateTime.fromISO(today, { zone: timezone }).minus({ days: days - 1 }).toISODate();
+    const from = period === 'all' ? null : DateTime.fromISO(today, { zone: timezone }).minus({ days: days - 1 }).toISODate();
     dateByUser.set(member.id, { today, from });
-    if (from && (!earliestDate || from < earliestDate)) earliestDate = from;
-    if (!latestDate || today > latestDate) latestDate = today;
   }
 
-  const match = { guildId: guild.id, userId: { $in: userIds } };
-  if (period !== 'all') match.localDate = { $gte: earliestDate, $lte: latestDate };
+  let match;
+  if (period === 'all') {
+    match = { guildId: guild.id, userId: { $in: userIds } };
+  } else {
+    match = {
+      guildId: guild.id,
+      $or: userIds.map(userId => {
+        const range = dateByUser.get(userId);
+        return { userId, localDate: { $gte: range.from, $lte: range.today } };
+      })
+    };
+  }
 
-  // Aggregate in Mongo instead of loading every daily document into Node,
-  // especially for all-time boards on long-running servers.
   const totals = await DailyActivity.aggregate([
     { $match: match },
     { $group: {
@@ -168,40 +229,10 @@ async function leaderboardData(guild, config, period) {
     } }
   ]);
   const totalByUser = new Map(totals.map(item => [item._id, { messages: item.messages || 0, voice: item.voice || 0 }]));
-
   const rows = staff.map(member => {
     const total = totalByUser.get(member.id) || { messages: 0, voice: 0 };
-    const range = dateByUser.get(member.id);
-    // One broad date match serves all timezones; filter timezone-specific bounds
-    // against records only if needed. The aggregate above is refined per-user
-    // in the follow-up group below for bounded periods.
-    return { id: member.id, name: member.displayName, messages: total.messages, voice: total.voice, points: activityPoints(total.messages, total.voice), range };
-  });
-
-  if (period !== 'all') {
-    // Correct for members with timezone dates that differ from the broad query's
-    // edges by re-aggregate with per-user date clauses.
-    const perUserMatch = {
-      guildId: guild.id,
-      $or: userIds.map(userId => {
-        const range = dateByUser.get(userId);
-        return { userId, localDate: { $gte: range.from, $lte: range.today } };
-      })
-    };
-    const boundedTotals = await DailyActivity.aggregate([
-      { $match: perUserMatch },
-      { $group: { _id: '$userId', messages: { $sum: '$messages' }, voice: { $sum: '$voiceMinutes' } } }
-    ]);
-    const boundedByUser = new Map(boundedTotals.map(item => [item._id, { messages: item.messages || 0, voice: item.voice || 0 }]));
-    for (const row of rows) {
-      const total = boundedByUser.get(row.id) || { messages: 0, voice: 0 };
-      row.messages = total.messages;
-      row.voice = total.voice;
-      row.points = activityPoints(total.messages, total.voice);
-    }
-  }
-
-  rows.sort((a, b) => b.points - a.points || b.messages - a.messages || b.voice - a.voice || a.name.localeCompare(b.name));
+    return { id: member.id, name: member.displayName, messages: total.messages, voice: total.voice, points: activityPoints(total.messages, total.voice) };
+  }).sort((a, b) => b.points - a.points || b.messages - a.messages || b.voice - a.voice || a.name.localeCompare(b.name));
   return { rows, target: activityTarget(config) };
 }
 
@@ -212,7 +243,7 @@ async function leaderboardPayload(guild, period, ownerId) {
   const body = rows.slice(0, 15).map((row, index) =>
     `**${String(index + 1).padStart(2, '0')}.** <@${row.id}> — **${row.points} pts** (${row.messages} messages · ${row.voice} voice min)`
   ).join('\n') || 'No configured staff activity found for this period.';
-  const targetText = period === 'all' ? 'All-time totals · no daily target applies.' : `Daily target: **${activityTarget(config)} combined points**`;
+  const targetText = period === 'all' ? 'All-time totals · no daily target applies.' : `Daily target: **${target} combined points**`;
   return {
     embeds: [embed(`Staff activity leaderboard // ${periodName(period)}`, `${targetText}\n\n${body}`)],
     components: periodRow(period, ownerId)
@@ -259,8 +290,6 @@ async function handleLeaderboardButton(interaction) {
 
   try {
     const normalized = normalizePeriod(period);
-    // Acknowledge before fetching members or aggregating Mongo data. Discord
-    // requires component interactions to be acknowledged within three seconds.
     await interaction.deferUpdate();
     const payload = await leaderboardPayload(interaction.guild, normalized, ownerId);
     return interaction.editReply(payload);
@@ -301,7 +330,8 @@ async function handleActivityCommand(ctx, legacyHandler) {
 async function handleHelp(ctx) {
   const description = [
     '**STAFF ACTIVITY**',
-    '`$modstats view [@user]` · `$modstats history [@user]` — per-day activity for each of the last 14 days',
+    '`$modstats view [@user]` — today’s activity, last-14-day check/cross mini-history, and all-time totals',
+    '`$modstats history [@user]` — detailed daily records for the last 14 days plus all-time totals',
     '`$modstats leaderboard` — Today, 7 days, 14 days, all time, or Custom range (1–365 days)',
     '`$modstats setup` · `$modstats channel add/remove/list #channel` · `$modstats voicechannel add/remove/list #channel`',
     '`$modstats requirement messages <count>` · `$modstats requirement voice <minutes>` · `$modstats defaulttimezone <IANA zone>`',
