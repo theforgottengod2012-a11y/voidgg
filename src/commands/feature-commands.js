@@ -2,6 +2,20 @@ const { PermissionFlagsBits } = require('discord.js');
 const { getConfig } = require('../utils/config');
 const { embed, failure } = require('../utils/embeds');
 
+const CORE_COMMANDS = new Set([
+  'help',
+  'modstats',
+  'tz',
+  'staffrole',
+  'promote',
+  'demote',
+  'strip',
+  'inrole',
+  'roleposition',
+  'rolereposition',
+  'staffroster'
+]);
+
 function reply(ctx, payload) {
   if (ctx.interaction) {
     if (ctx.interaction.deferred || ctx.interaction.replied) return ctx.interaction.editReply(payload);
@@ -20,7 +34,11 @@ function canManage(ctx) {
 async function handleFeature(ctx, name) {
   if (!ctx.guild) return false;
 
-  // Keep the service online while unsupported feature handlers are restored.
+  // These commands have dedicated handlers in src/index.js. Let them run there;
+  // swallowing them here makes valid commands look like successful deployments
+  // while responding that every request is unavailable.
+  if (CORE_COMMANDS.has(name)) return false;
+
   if (name === 'setup' || name === 'config') {
     const config = await getConfig(ctx.guild.id);
     if (!canManage(ctx)) {
@@ -36,20 +54,19 @@ async function handleFeature(ctx, name) {
     return reply(ctx, { embeds: [embed(name === 'setup' ? 'VOID setup checklist' : 'VOID configuration', description)] });
   }
 
-  return reply(ctx, {
-    embeds: [failure(`The ${name} feature is temporarily unavailable while the deployment fix is applied.`)]
-  });
+  // Do not claim unrelated commands: the main dispatcher may have a handler for them.
+  return false;
 }
 
 async function executeBulkRole(interaction) {
   return interaction.reply({
-    embeds: [failure('Bulk role changes are temporarily unavailable while the deployment fix is applied.')],
+    embeds: [failure('Bulk role changes are temporarily unavailable while the feature handler is restored.')],
     ephemeral: true
   });
 }
 
 async function runScheduledTasks() {
-  // Scheduled feature work is intentionally disabled until its handler is repaired.
+  // Scheduled feature work remains disabled until its handler is restored.
 }
 
 module.exports = { handleFeature, executeBulkRole, runScheduledTasks };
