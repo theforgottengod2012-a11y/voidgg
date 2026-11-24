@@ -1,11 +1,11 @@
 const { Client, GatewayIntentBits, Partials, Events } = require('discord.js');
 const { connectDatabase } = require('./database');
 const { onMessage, onVoiceState, heartbeat, recoverSessions } = require('./services/tracking');
-const { handleModstats, handleTimezone, handleStaffRole, staffAction, executeStaffConfirmation, executeResetConfirmation, handleHelp } = require('./commands/handlers');
+const { handleModstats, handleTimezone, handleStaffRole, staffAction, executeStaffConfirmation, executeResetConfirmation } = require('./commands/handlers');
 const { handleInRole, handleRolePosition, handleRoleReposition } = require('./commands/role-commands');
 const { handleFeature, executeBulkRole, runScheduledTasks } = require('./commands/feature-commands');
 const { handleRoster } = require('./commands/roster');
-const { handleActivityCommand, handleLeaderboardButton, handleHelp: handleUpdatedHelp } = require('./commands/activity-ui');
+const { handleActivityCommand, handleLeaderboardButton, handleLeaderboardModal, handleHelp } = require('./commands/activity-ui');
 
 if (process.env.NODE_ENV !== 'production') {
   try { require('dotenv').config(); } catch { /* dotenv is optional outside production */ }
@@ -24,7 +24,7 @@ async function dispatch(ctx, name) {
     if (name === 'staffroster') return await handleRoster(ctx);
     const handled = await handleFeature(ctx, name);
     if (handled !== false) return handled;
-    if (name === 'help') return await handleUpdatedHelp(ctx);
+    if (name === 'help') return await handleHelp(ctx);
     if (name === 'modstats') return await handleActivityCommand(ctx, handleModstats);
     if (name === 'tz') return await handleTimezone(ctx);
     if (name === 'staffrole') return await handleStaffRole(ctx);
@@ -33,7 +33,7 @@ async function dispatch(ctx, name) {
     if (name === 'rolereposition') return await handleRoleReposition(ctx);
     if (['promote', 'demote', 'strip'].includes(name)) return await staffAction(ctx, name);
   } catch (error) {
-    console.error(`[command:${name}]`, error?.message || 'Unknown command error');
+    console.error(`[command:${name}]`, error?.stack || error?.message || 'Unknown command error');
     const payload = { embeds: [require('./utils/embeds').failure('The request could not be completed. Check the configuration and try again.')] };
     if (ctx.interaction) {
       if (ctx.interaction.deferred || ctx.interaction.replied) await ctx.interaction.editReply(payload).catch(() => {});
@@ -59,6 +59,7 @@ client.on(Events.MessageCreate, message => {
 client.on(Events.VoiceStateUpdate, (oldState, newState) => onVoiceState(oldState, newState).catch(error => console.error('[tracking] voice state:', error.message)));
 client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isButton() && interaction.customId.startsWith('leaderboard:')) return handleLeaderboardButton(interaction);
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('leaderboard-modal:')) return handleLeaderboardModal(interaction);
   if (interaction.isButton() && interaction.customId.startsWith('staffconfirm:')) return executeStaffConfirmation(interaction);
   if (interaction.isButton() && interaction.customId.startsWith('resetconfirm:')) return executeResetConfirmation(interaction);
   if (interaction.isButton() && interaction.customId.startsWith('bulkrole:')) return executeBulkRole(interaction);
