@@ -5,6 +5,7 @@ const { handleModstats, handleTimezone, handleStaffRole, staffAction, executeSta
 const { handleInRole, handleRolePosition, handleRoleReposition } = require('./commands/role-commands');
 const { handleFeature, executeBulkRole, runScheduledTasks } = require('./commands/feature-commands');
 const { handleRoster } = require('./commands/roster');
+const { handleActivityCommand, handleLeaderboardButton, handleHelp: handleUpdatedHelp } = require('./commands/activity-ui');
 
 if (process.env.NODE_ENV !== 'production') {
   try { require('dotenv').config(); } catch { /* dotenv is optional outside production */ }
@@ -23,8 +24,8 @@ async function dispatch(ctx, name) {
     if (name === 'staffroster') return await handleRoster(ctx);
     const handled = await handleFeature(ctx, name);
     if (handled !== false) return handled;
-    if (name === 'help') return await handleHelp(ctx);
-    if (name === 'modstats') return await handleModstats(ctx);
+    if (name === 'help') return await handleUpdatedHelp(ctx);
+    if (name === 'modstats') return await handleActivityCommand(ctx, handleModstats);
     if (name === 'tz') return await handleTimezone(ctx);
     if (name === 'staffrole') return await handleStaffRole(ctx);
     if (name === 'inrole') return await handleInRole(ctx);
@@ -57,6 +58,7 @@ client.on(Events.MessageCreate, message => {
 });
 client.on(Events.VoiceStateUpdate, (oldState, newState) => onVoiceState(oldState, newState).catch(error => console.error('[tracking] voice state:', error.message)));
 client.on(Events.InteractionCreate, async interaction => {
+  if (interaction.isButton() && interaction.customId.startsWith('leaderboard:')) return handleLeaderboardButton(interaction);
   if (interaction.isButton() && interaction.customId.startsWith('staffconfirm:')) return executeStaffConfirmation(interaction);
   if (interaction.isButton() && interaction.customId.startsWith('resetconfirm:')) return executeResetConfirmation(interaction);
   if (interaction.isButton() && interaction.customId.startsWith('bulkrole:')) return executeBulkRole(interaction);
