@@ -4,6 +4,7 @@ const { onMessage, onVoiceState, heartbeat, recoverSessions } = require('./servi
 const { handleModstats, handleTimezone, handleStaffRole, staffAction, executeStaffConfirmation, executeResetConfirmation, handleHelp } = require('./commands/handlers');
 const { handleInRole, handleRolePosition, handleRoleReposition } = require('./commands/role-commands');
 const { handleFeature, executeBulkRole, runScheduledTasks } = require('./commands/feature-commands');
+const { handleRoster } = require('./commands/roster');
 
 if (process.env.NODE_ENV !== 'production') {
   try { require('dotenv').config(); } catch { /* dotenv is optional outside production */ }
@@ -19,6 +20,7 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBit
 client.pending = new Map();
 async function dispatch(ctx, name) {
   try {
+    if (name === 'staffroster') return await handleRoster(ctx);
     const handled = await handleFeature(ctx, name);
     if (handled !== false) return handled;
     if (name === 'help') return await handleHelp(ctx);
