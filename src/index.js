@@ -2,6 +2,7 @@ const { Client, GatewayIntentBits, Partials, Events } = require('discord.js');
 const { connectDatabase } = require('./database');
 const { onMessage, onVoiceState, heartbeat, recoverSessions } = require('./services/tracking');
 const { handleModstats, handleTimezone, handleStaffRole, staffAction, executeStaffConfirmation, executeResetConfirmation, handleHelp } = require('./commands/handlers');
+const { handleInRole, handleRolePosition, handleRoleReposition } = require('./commands/role-commands');
 
 // dotenv is for local development only. Railway injects variables directly into process.env.
 if (process.env.NODE_ENV !== 'production') {
@@ -25,6 +26,9 @@ async function dispatch(ctx, name) {
     if (name === 'modstats') return await handleModstats(ctx);
     if (name === 'tz') return await handleTimezone(ctx);
     if (name === 'staffrole') return await handleStaffRole(ctx);
+    if (name === 'inrole') return await handleInRole(ctx);
+    if (name === 'roleposition') return await handleRolePosition(ctx);
+    if (name === 'rolereposition') return await handleRoleReposition(ctx);
     if (['promote', 'demote', 'strip'].includes(name)) return await staffAction(ctx, name);
   } catch (error) {
     console.error(`[command:${name}]`, error?.message || 'Unknown command error');
