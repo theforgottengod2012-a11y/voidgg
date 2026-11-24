@@ -3,12 +3,11 @@ const { connectDatabase } = require('./database');
 const { onMessage, onVoiceState, heartbeat, recoverSessions } = require('./services/tracking');
 const { handleModstats, handleTimezone, handleStaffRole, staffAction, executeStaffConfirmation, executeResetConfirmation, handleHelp } = require('./commands/handlers');
 const { handleInRole, handleRolePosition, handleRoleReposition } = require('./commands/role-commands');
+const { handleFeature, executeBulkRole, runScheduledTasks } = require('./commands/feature-commands');
 
-// dotenv is for local development only. Railway injects variables directly into process.env.
 if (process.env.NODE_ENV !== 'production') {
   try { require('dotenv').config(); } catch { /* dotenv is optional outside production */ }
 }
-
 const REQUIRED_ENV = ['BOT_TOKEN', 'CLIENT_ID', 'MONGODB_URI'];
 const missing = REQUIRED_ENV.filter(name => !process.env[name]?.trim());
 if (missing.length) {
@@ -16,12 +15,12 @@ if (missing.length) {
   console.error('[startup] Set them in Railway Service → Variables or your local environment. Values are never logged.');
   process.exit(1);
 }
-
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildVoiceStates], partials: [Partials.Channel] });
 client.pending = new Map();
-
 async function dispatch(ctx, name) {
   try {
+    const handled = await handleFeature(ctx, name);
+    if (handled !== false) return handled;
     if (name === 'help') return await handleHelp(ctx);
     if (name === 'modstats') return await handleModstats(ctx);
     if (name === 'tz') return await handleTimezone(ctx);
@@ -43,6 +42,7 @@ client.once(Events.ClientReady, async ready => {
   console.log(`[client] Online as ${ready.user.tag}`);
   await recoverSessions(client);
   setInterval(() => heartbeat(client).catch(error => console.error('[tracking] heartbeat:', error.message)), 60_000).unref();
+  setInterval(() => runScheduledTasks(client).catch(error => console.error('[scheduler] task:', error.message)), 60_000).unref();
 });
 client.on(Events.MessageCreate, message => {
   if (message.author.bot || !message.guild) return;
@@ -57,6 +57,7 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => onVoiceState(oldState
 client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isButton() && interaction.customId.startsWith('staffconfirm:')) return executeStaffConfirmation(interaction);
   if (interaction.isButton() && interaction.customId.startsWith('resetconfirm:')) return executeResetConfirmation(interaction);
+  if (interaction.isButton() && interaction.customId.startsWith('bulkrole:')) return executeBulkRole(interaction);
   if (!interaction.isChatInputCommand()) return;
   const ctx = { client, guild: interaction.guild, member: interaction.member, user: interaction.user, interaction, args: [] };
   await dispatch(ctx, interaction.commandName);
@@ -64,9 +65,8 @@ client.on(Events.InteractionCreate, async interaction => {
 client.on(Events.Error, error => console.error('[client] Discord client error:', error.message));
 process.on('unhandledRejection', error => console.error('[process] Unhandled rejection:', error?.message || 'Unknown rejection'));
 (async () => {
-  try {
-    await connectDatabase(process.env.MONGODB_URI);
-  } catch (error) {
+  try { await connectDatabase(process.env.MONGODB_URI); }
+  catch (error) {
     console.error('[startup] MongoDB connection failed. Verify MONGODB_URI and network access.');
     console.error(`[startup] ${error?.name || 'Error'}: ${error?.message || 'connection error'}`);
     process.exit(1);
