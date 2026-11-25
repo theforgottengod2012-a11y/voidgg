@@ -3,7 +3,6 @@ const { getConfig } = require('../utils/config');
 const { embed, failure } = require('../utils/embeds');
 
 const CORE_COMMANDS = new Set([
-  'help',
   'modstats',
   'tz',
   'staffrole',
@@ -38,6 +37,46 @@ async function handleFeature(ctx, name) {
   // swallowing them here makes valid commands look like successful deployments
   // while responding that every request is unavailable.
   if (CORE_COMMANDS.has(name)) return false;
+
+  if (name === 'help') {
+    const description = [
+      '**STAFF ACTIVITY**',
+      '`$modstats view [@user]` — today’s activity and all-time totals',
+      '`$modstats history [@user]` — detailed daily records',
+      '`$modstats leaderboard` — activity leaderboard and date ranges',
+      '`$modstats setup` — tracking setup and requirement status',
+      '`$modstats reset @user|all` — reset today’s counters (manager)',
+      '',
+      '**TRACKING CONFIGURATION** (manager)',
+      '`$modstats channel add/remove/list #channel`',
+      '`$modstats voicechannel add/remove/list #channel`',
+      '`$modstats afk set #channel|disable`',
+      '`$modstats requirement messages|voice <amount>`',
+      '`$modstats defaulttimezone <IANA>`',
+      '`$modstats audit #channel` · `$modstats permissions add/remove @role`',
+      '`$modstats restrict on|off`',
+      '',
+      '**TIMEZONES**',
+      '`$tz` — show your timezone and local time',
+      '`$tz Asia/Dhaka` — set your timezone',
+      '`$tz @user` — view another member’s timezone',
+      '`$tz list` · `$tz reset`',
+      '',
+      '**STAFF ROLES** (manager)',
+      '`$staffrole add @role` · `$staffrole remove @role`',
+      '`$staffrole list` · `$staffrole config` · `$staffrole setorder @role...`',
+      '`$promote @member` · `$demote @member` · `$strip @member`',
+      '',
+      '**ROLES & ROSTER**',
+      '`$inrole @role` · `$roleposition @role`',
+      '`$rolereposition @role <position>` (manager)',
+      '`$staffroster [@role]`',
+      '`$setup` · `$config` — setup/configuration status',
+      '',
+      'Equivalent slash commands are available.'
+    ].join('\n');
+    return reply(ctx, { embeds: [embed('VOID // command directory', description)] });
+  }
 
   if (name === 'setup' || name === 'config') {
     const config = await getConfig(ctx.guild.id);
